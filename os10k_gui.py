@@ -346,14 +346,16 @@ class App(tk.Tk):
         st.configure("TButton", padding=(10, 5))
         st.configure("TNotebook", background=PALE, borderwidth=0)
         st.configure("TNotebook", tabmargins=(2, 6, 2, 0))
-        st.configure("TNotebook.Tab", padding=(14, 5), font=("Segoe UI Semibold", 10),
-                     foreground="#5A6378", background="#E1E5EC")
+        st.configure("TNotebook.Tab", padding=(18, 7), font=("Segoe UI Semibold", 10),
+                     foreground="#7A8296", background="#DDE2EA", bordercolor="#C9CED8",
+                     lightcolor="#DDE2EA")
         st.map("TNotebook.Tab",
-               background=[("selected", "white"), ("active", "#EEF1F6")],
-               foreground=[("selected", NAVY)],
-               font=[("selected", ("Segoe UI Semibold", 12))],
-               padding=[("selected", (22, 9))],
-               expand=[("selected", (2, 6, 2, 0))])
+               background=[("selected", "white"), ("active", "#EAEEF4")],
+               foreground=[("selected", NAVY), ("active", "#4A5368")],
+               lightcolor=[("selected", ORANGE)],
+               bordercolor=[("selected", ORANGE)],
+               padding=[("selected", (18, 9, 18, 7))],
+               expand=[("selected", (0, 0, 0, 0))])
         st.configure("Horizontal.TProgressbar", background=ORANGE, troughcolor="#E1E5EC")
 
     # ---- layout ---------------------------------------------------------
