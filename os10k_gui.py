@@ -109,31 +109,23 @@ def make_tick_images(size=16, pad_right=6):
     }
 
 
-def make_cog_image(size=20, k=8):
-    """Windows-style settings cog: grey gear, light ring, blue centre."""
+def make_cog_image(size=20, k=8, colour=(74, 84, 104, 255)):
+    """Outline-only settings cog: gear edge plus centre ring, no fill."""
     S = size * k
     c = S / 2
     im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    R, r, n = S * 0.48, S * 0.36, 8
+    w = int(1.7 * k)                       # ~1.7 px line at 20 px
+    R, r, n = S * 0.47 - w / 2, S * 0.35, 8
     pts = []
     for i in range(n):
         a = 2 * math.pi * i / n
         for da, rad in ((-0.30, r), (-0.20, R), (0.20, R), (0.30, r)):
             t = a + da * (2 * math.pi / n)
             pts.append((c + rad * math.cos(t), c + rad * math.sin(t)))
-    grey = (104, 112, 124, 255)
-    d.polygon(pts, fill=grey)
-    d.ellipse([c - r, c - r, c + r, c + r], fill=grey)
-    d.ellipse([c - S * 0.25, c - S * 0.25, c + S * 0.25, c + S * 0.25], fill=(236, 238, 242, 255))
-    rb = S * 0.19                                      # blue centre, light top-left to dark
-    steps = 40
-    for j in range(steps):
-        f = j / (steps - 1)
-        rr = rb * (1 - f * 0.92)
-        ox, oy = -rb * 0.28 * f, -rb * 0.28 * f
-        col = (int(14 + 50 * f), int(72 + 74 * f), int(160 + 70 * f), 255)
-        d.ellipse([c + ox - rr, c + oy - rr, c + ox + rr, c + oy + rr], fill=col)
+    d.line(pts + pts[:2], fill=colour, width=w, joint="curve")
+    rc = S * 0.15
+    d.ellipse([c - rc, c - rc, c + rc, c + rc], outline=colour, width=w)
     return im.resize((size, size), Image.Resampling.LANCZOS)
 
 
