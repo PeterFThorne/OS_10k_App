@@ -18,6 +18,7 @@ run_extraction(). Only dependency: Pillow.
 
 CLI examples:
     python vm10k_core.py --gr "ST 2250 2750" --width 1000 --height 1000 -o D:\\out
+    python vm10k_core.py --shp D:\\site\\red_line.shp --buffer 300 -o D:\\out
     python vm10k_core.py --sw 325000 130000 --width 3000 --height 2000 --mode crop -o D:\\out
 """
 
@@ -26,8 +27,10 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -35,7 +38,7 @@ from PIL import Image, TiffImagePlugin
 
 Image.MAX_IMAGE_PIXELS = None
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 DEFAULT_DATA_ROOT = r"E:\DATA\AVectormap"
 TILE_SIZE_M = 5000
@@ -245,6 +248,180 @@ class TileArchive:
             raise FileNotFoundError(f"No grid-square subfolders in {self.root}")
 
 
+
+# --------------------------------------------------------------------------
+# Shapefile input (site extent = shapefile(s) extent + buffer)
+# --------------------------------------------------------------------------
+
+SHP_POINT_TYPES = {1, 8, 11, 18, 21, 28}
+SHP_LINE_TYPES = {3, 13, 23}
+SHP_POLY_TYPES = {5, 15, 25}
+MAX_PREVIEW_POINTS = 60000
+
+
+def read_shp_bbox(path):
+    """(minx, miny, maxx, maxy, shape_type) from the .shp header."""
+    with open(path, "rb") as f:
+        head = f.read(100)
+    if len(head) < 100 or struct.unpack(">i", head[:4])[0] != 9994:
+        raise ValueError(f"{os.path.basename(path)} is not a valid shapefile")
+    shape_type = struct.unpack("<i", head[32:36])[0]
+    minx, miny, maxx, maxy = struct.unpack("<4d", head[36:68])
+    return minx, miny, maxx, maxy, shape_type
+
+
+def read_shp_geometry(path, max_points=MAX_PREVIEW_POINTS):
+    """Parts as lists of (x, y) for drawing - thinned if the file is big.
+    Returns (kind, parts) where kind is 'point' | 'line' | 'poly'."""
+    _, _, _, _, stype = read_shp_bbox(path)
+    kind = "point" if stype in SHP_POINT_TYPES else "line" if stype in SHP_LINE_TYPES else "poly"
+    size = os.path.getsize(path)
+    approx_pts = max(1, (size - 100) // 16)
+    step = max(1, approx_pts // max_points)
+    parts = []
+    with open(path, "rb") as f:
+        data = f.read()
+    off = 100
+    while off + 8 <= len(data):
+        clen = struct.unpack(">i", data[off + 4:off + 8])[0] * 2
+        rec = data[off + 8:off + 8 + clen]
+        off += 8 + clen
+        if len(rec) < 4:
+            continue
+        rtype = struct.unpack("<i", rec[:4])[0]
+        if rtype == 0:
+            continue
+        if rtype in (1, 11, 21):
+            parts.append([struct.unpack("<2d", rec[4:20])])
+        elif rtype in (8, 18, 28):
+            n = struct.unpack("<i", rec[36:40])[0]
+            pts = struct.unpack(f"<{2 * n}d", rec[40:40 + 16 * n])
+            parts.extend([[(pts[i], pts[i + 1])] for i in range(0, 2 * n, 2 * step)])
+        elif rtype in (3, 13, 23, 5, 15, 25):
+            nparts, npts = struct.unpack("<2i", rec[36:44])
+            idx = list(struct.unpack(f"<{nparts}i", rec[44:44 + 4 * nparts])) + [npts]
+            p0 = 44 + 4 * nparts
+            pts = struct.unpack(f"<{2 * npts}d", rec[p0:p0 + 16 * npts])
+            for a, b in zip(idx[:-1], idx[1:]):
+                seg = [(pts[2 * i], pts[2 * i + 1]) for i in range(a, b, step)]
+                if b - 1 > a and (b - 1 - a) % step:
+                    seg.append((pts[2 * (b - 1)], pts[2 * (b - 1) + 1]))
+                if seg:
+                    parts.append(seg)
+    return kind, parts
+
+
+def prj_is_bng(prj_text):
+    t = prj_text.upper().replace(" ", "_")
+    return ("BRITISH_NATIONAL_GRID" in t or "OSGB_1936" in t or "OSGB36" in t
+            or "27700" in t or "TRANSVERSE_MERCATOR" in t and "400000" in t and "-100000" in t)
+
+
+@dataclass
+class ShapeInput:
+    path: str                 # original .shp
+    name: str                 # file stem
+    bng_path: str             # .shp in BNG (original, or reprojected temp copy)
+    bbox: tuple               # (minx, miny, maxx, maxy) in BNG
+    shape_type: int
+    reprojected: bool = False
+    note: str = ""
+
+
+_reproj_dir = None
+
+
+def load_shapefile(path):
+    """Read a shapefile's extent in British National Grid. Non-BNG shapefiles
+    are reprojected with GDAL (ogr2ogr) to a temp copy."""
+    global _reproj_dir
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Shapefile not found: {path}")
+    name = os.path.splitext(os.path.basename(path))[0]
+    minx, miny, maxx, maxy, stype = read_shp_bbox(path)
+    prj = os.path.splitext(path)[0] + ".prj"
+    prj_text = ""
+    if os.path.exists(prj):
+        with open(prj, errors="ignore") as f:
+            prj_text = f.read()
+    looks_bng = 0 <= minx and maxx <= 700000 and 0 <= miny and maxy <= 1300000 and maxx > 1000
+    if prj_text and prj_is_bng(prj_text):
+        return ShapeInput(path, name, path, (minx, miny, maxx, maxy), stype)
+    if not prj_text and looks_bng:
+        return ShapeInput(path, name, path, (minx, miny, maxx, maxy), stype,
+                          note="no .prj - assumed British National Grid")
+    # needs reprojecting
+    ogr = find_ogr2ogr()
+    if not ogr:
+        raise RuntimeError(
+            f"{name}.shp is not in British National Grid and GDAL (ogr2ogr) wasn't found to "
+            "reproject it. Reproject it to EPSG:27700 first, or install GDAL.")
+    if not prj_text:
+        raise RuntimeError(f"{name}.shp has no .prj and its coordinates aren't British National Grid")
+    if _reproj_dir is None:
+        _reproj_dir = tempfile.mkdtemp(prefix="os10k_shp_")
+    out = os.path.join(_reproj_dir, f"{name}_{abs(hash(path)) % 10**8}_bng.shp")
+    run_ogr([ogr, "-f", "ESRI Shapefile", out, path, "-t_srs", "EPSG:27700", "-overwrite"])
+    minx, miny, maxx, maxy, stype = read_shp_bbox(out)
+    return ShapeInput(path, name, out, (minx, miny, maxx, maxy), stype, True,
+                      note="reprojected to British National Grid")
+
+
+def box_from_shapefiles(shapes, buffer_m=300.0):
+    """Union extent of the shapefiles plus buffer on every side."""
+    if not shapes:
+        raise ValueError("Add at least one shapefile")
+    minx = min(s.bbox[0] for s in shapes) - buffer_m
+    miny = min(s.bbox[1] for s in shapes) - buffer_m
+    maxx = max(s.bbox[2] for s in shapes) + buffer_m
+    maxy = max(s.bbox[3] for s in shapes) + buffer_m
+    if maxx <= minx or maxy <= miny:      # single point with zero buffer
+        minx, miny, maxx, maxy = minx - 1, miny - 1, maxx + 1, maxy + 1
+    return SiteBox(minx, miny, maxx, maxy)
+
+
+def find_case(path):
+    """Actual on-disk path for 'path', ignoring case (GDAL may write .tab)."""
+    if os.path.exists(path):
+        return path
+    folder, base = os.path.split(path)
+    try:
+        for f in os.listdir(folder or "."):
+            if f.lower() == base.lower():
+                return os.path.join(folder, f)
+    except OSError:
+        pass
+    return None
+
+
+def run_ogr(cmd):
+    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}   # no console flash
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **kw)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "ogr2ogr failed").strip().splitlines()[-1])
+    return r
+
+
+def shapefile_to_tab(shape, out_dir, log):
+    """Input shapefile -> MapInfo TAB in British National Grid (EPSG:27700 forced,
+    otherwise GDAL labels the datum wrongly)."""
+    ogr = find_ogr2ogr()
+    if not ogr:
+        log(f"  {shape.name}: GDAL not found - shapefile not converted to TAB")
+        return None
+    tab = os.path.join(out_dir, shape.name + ".TAB")
+    try:
+        run_ogr([ogr, "-f", "MapInfo File", tab, shape.bng_path, "-a_srs", "EPSG:27700",
+                 "-dsco", "FORMAT=TAB", "-overwrite"])
+        tab = find_case(tab)
+        if not tab:
+            raise RuntimeError("no TAB written")
+        log(f"  {shape.name}.shp -> {os.path.basename(tab)}")
+        return tab
+    except Exception as exc:
+        log(f"  {shape.name}: TAB conversion failed ({exc})")
+        return None
+
 # --------------------------------------------------------------------------
 # Writers
 # --------------------------------------------------------------------------
@@ -326,7 +503,7 @@ def find_ogr2ogr():
     return None
 
 
-def write_site_boundary(out_dir, box, site_name, log):
+def write_site_boundary(out_dir, box, site_name, log, delete_mif=True):
     base = os.path.join(out_dir, "Site_Boundary")
     mif = write_site_mif(base, box, site_name)
     ogr = find_ogr2ogr()
@@ -334,19 +511,29 @@ def write_site_boundary(out_dir, box, site_name, log):
         log("  Site boundary written as MIF/MID (GDAL not found - import it in MapInfo)")
         return None
     tab = base + ".TAB"
-    cmd = [ogr, "-f", "MapInfo File", tab, mif, "-a_srs", "EPSG:27700",
-           "-dsco", "FORMAT=TAB"]
     try:
-        kw = {"creationflags": 0x08000000} if os.name == "nt" else {}  # no console flash
-        subprocess.run(cmd, check=True, capture_output=True, timeout=60, **kw)
-        log("  Site boundary written as TAB (and MIF/MID)")
-        return tab
+        run_ogr([ogr, "-f", "MapInfo File", tab, mif, "-a_srs", "EPSG:27700",
+                 "-dsco", "FORMAT=TAB", "-overwrite"])
     except Exception as exc:  # keep going, the MIF is still there
         log(f"  Site boundary TAB conversion failed ({exc}); MIF/MID kept")
         return None
+    tab = find_case(tab)
+    if not tab:
+        log("  Site boundary TAB conversion produced no file; MIF/MID kept")
+        return None
+    if delete_mif:
+        for ext in (".mif", ".mid"):
+            try:
+                os.remove(base + ext)
+            except OSError:
+                pass
+        log("  Site boundary written as TAB")
+    else:
+        log("  Site boundary written as TAB (and MIF/MID)")
+    return tab
 
 
-def write_workspace(wor_path, table_files, box, boundary_tab=None):
+def write_workspace(wor_path, table_files, box, boundary_tab=None, vector_tabs=()):
     """MapInfo workspace that opens every raster (plus the boundary) in one map."""
     aliases, lines = [], ["!Workspace", "!Version 600", "!Charset WindowsLatin1"]
     for tf in table_files:
@@ -357,7 +544,17 @@ def write_workspace(wor_path, table_files, box, boundary_tab=None):
         lines.append(f'Open Table "{os.path.basename(tf)}" As {alias} Interactive')
     if boundary_tab:
         lines.append(f'Open Table "{os.path.basename(boundary_tab)}" As Site_Boundary Interactive')
-        aliases.insert(0, "Site_Boundary")      # top layer
+        aliases.insert(0, "Site_Boundary")      # above the rasters
+    out_dir = os.path.dirname(wor_path)
+    for vt in vector_tabs:                      # input shapefiles - top layers
+        alias = re.sub(r"\W", "_", os.path.splitext(os.path.basename(vt))[0])
+        if alias[0].isdigit():
+            alias = "T_" + alias
+        if alias in aliases:
+            alias += "_shp"
+        rel = os.path.relpath(vt, out_dir) if os.path.splitdrive(vt)[0].lower() == os.path.splitdrive(out_dir)[0].lower() else vt
+        lines.append(f'Open Table "{rel}" As {alias} Interactive')
+        aliases.insert(0, alias)
     cx, cy = box.centre
     zoom = max(box.width, box.height) * 1.3
     lines += [
@@ -472,6 +669,9 @@ class RunOptions:
     make_subfolder: bool = False
     write_wor: bool = True
     write_boundary: bool = True
+    delete_boundary_mif: bool = True    # drop Site_Boundary MIF/MID once the TAB exists
+    shapefiles: list = field(default_factory=list)   # ShapeInput list (shapefile mode)
+    convert_shapefiles: bool = True
 
 
 @dataclass
@@ -481,6 +681,7 @@ class RunResult:
     missing: list = field(default_factory=list)
     generated_tabs: list = field(default_factory=list)
     outputs: list = field(default_factory=list)
+    shapefile_tabs: list = field(default_factory=list)
     workspace: str = None
 
 
@@ -510,6 +711,8 @@ def run_extraction(box, opts, log=print, progress=None):
     log(f"OS 10k Tool v{__version__}")
     log(f"Site '{opts.site_name}': centre {format_grid_ref(cx, cy)} "
         f"({box.width:.0f} m x {box.height:.0f} m)")
+    for sh in opts.shapefiles:
+        log(f"Shapefile: {os.path.basename(sh.path)}" + (f"  ({sh.note})" if sh.note else ""))
     log(f"Tiles touched: {', '.join(t.name for t in tiles)}")
     if res.missing:
         log(f"Not in archive (sea / no coverage): {', '.join(res.missing)}")
@@ -537,10 +740,15 @@ def run_extraction(box, opts, log=print, progress=None):
 
     boundary = None
     if opts.write_boundary:
-        boundary = write_site_boundary(out_dir, box, opts.site_name, log)
+        boundary = write_site_boundary(out_dir, box, opts.site_name, log, opts.delete_boundary_mif)
+    if opts.shapefiles and opts.convert_shapefiles:
+        for sh in opts.shapefiles:
+            tab = shapefile_to_tab(sh, out_dir, log)
+            if tab:
+                res.shapefile_tabs.append(tab)
     if opts.write_wor:
         res.workspace = os.path.join(out_dir, safe_name(opts.site_name) + ".WOR")
-        write_workspace(res.workspace, res.outputs, box, boundary)
+        write_workspace(res.workspace, res.outputs, box, boundary, res.shapefile_tabs)
         log(f"  Workspace: {os.path.basename(res.workspace)}")
 
     with open(os.path.join(out_dir, "OS10k_run_summary.txt"), "w", newline="") as f:
@@ -549,6 +757,8 @@ def run_extraction(box, opts, log=print, progress=None):
             f"Site name: {opts.site_name}",
             f"Centre:    {format_grid_ref(cx, cy)}  ({cx:.1f}, {cy:.1f})",
             f"SW corner: ({box.minx:.1f}, {box.miny:.1f})",
+            *([f"Shapefiles: {', '.join(os.path.basename(x.path) for x in opts.shapefiles)}"]
+              if opts.shapefiles else []),
             f"Size:      {box.width:.1f} m x {box.height:.1f} m",
             f"Mode:      {'exact crop' if opts.mode == 'crop' else 'whole tiles'}",
             f"Source:    {opts.data_root}",
@@ -566,8 +776,12 @@ def main():
     loc = ap.add_mutually_exclusive_group(required=True)
     loc.add_argument("--gr", help="Centre grid reference, e.g. 'ST 2250 2750' or '322500,127500'")
     loc.add_argument("--sw", nargs=2, type=float, metavar=("E", "N"), help="South-west corner")
-    ap.add_argument("--width", type=float, required=True, help="Box width (m)")
-    ap.add_argument("--height", type=float, required=True, help="Box height (m)")
+    loc.add_argument("--shp", nargs="+", metavar="SHP", help="Shapefile(s) - site = extent + buffer")
+    ap.add_argument("--buffer", type=float, default=300.0, help="Buffer round shapefile extent (m, default 300)")
+    ap.add_argument("--width", type=float, help="Box width (m)")
+    ap.add_argument("--height", type=float, help="Box height (m)")
+    ap.add_argument("--keep-mif", action="store_true", help="Keep boundary MIF/MID after TAB is made")
+    ap.add_argument("--no-shp-tab", action="store_true", help="Don't convert shapefiles to TAB")
     ap.add_argument("--mode", choices=["tiles", "crop"], default="tiles")
     ap.add_argument("--data", default=DEFAULT_DATA_ROOT, help="Tile archive root")
     ap.add_argument("-o", "--out", required=True, help="Output folder")
@@ -577,14 +791,27 @@ def main():
     ap.add_argument("--no-boundary", action="store_true")
     a = ap.parse_args()
 
-    if a.gr:
-        e, n = parse_grid_ref(a.gr)
-        box = SiteBox.from_centre(e, n, a.width, a.height)
-    else:
-        box = SiteBox.from_sw(a.sw[0], a.sw[1], a.width, a.height)
+    shapes = []
+    try:
+        if a.shp:
+            shapes = [load_shapefile(p) for p in a.shp]
+            box = box_from_shapefiles(shapes, a.buffer)
+        else:
+            if a.width is None or a.height is None:
+                ap.error("--width and --height are needed with --gr / --sw")
+            if a.gr:
+                e, n = parse_grid_ref(a.gr)
+                box = SiteBox.from_centre(e, n, a.width, a.height)
+            else:
+                box = SiteBox.from_sw(a.sw[0], a.sw[1], a.width, a.height)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     cx, cy = box.centre
-    name = a.name or format_grid_ref(cx, cy).replace(" ", "")
-    opts = RunOptions(a.data, a.out, name, a.mode, a.subfolder, not a.no_wor, not a.no_boundary)
+    name = a.name or (shapes[0].name if shapes else format_grid_ref(cx, cy).replace(" ", ""))
+    opts = RunOptions(a.data, a.out, name, a.mode, a.subfolder, not a.no_wor, not a.no_boundary,
+                      delete_boundary_mif=not a.keep_mif, shapefiles=shapes,
+                      convert_shapefiles=not a.no_shp_tab)
     try:
         run_extraction(box, opts)
     except Exception as exc:

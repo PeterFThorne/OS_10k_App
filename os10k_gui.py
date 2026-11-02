@@ -2,7 +2,8 @@
 """
 OS 10k Tool - desktop front end for vm10k_core.py
 
-Pick a site (centre grid reference or south-west corner + width/height),
+Pick a site (centre grid reference, south-west corner + width/height, or
+shapefile(s) + buffer),
 preview it on the actual 1:10,000 map, and export the OS VectorMap Local
 raster tiles for MapInfo - whole tiles (default) or an exact crop.
 
@@ -47,6 +48,11 @@ DEFAULTS = {
     "last_gr": "ST 22500 27500",
     "last_width": "1000",
     "last_height": "1000",
+    "delete_boundary_mif": True,
+    "shp_buffer": "300",
+    "shp_same_folder": False,
+    "shp_convert": True,
+    "last_shp_dir": "",
 }
 
 
@@ -78,6 +84,30 @@ def open_folder(path):
         subprocess.Popen(["xdg-open", path])
 
 
+def make_tick_images(size=16, pad_right=6):
+    """Checkbox images with a tick (ttk 'clam' draws a cross)."""
+    k = 4
+    S = size * k
+
+    def box(fill, border, tick=None):
+        im = Image.new("RGBA", ((size + pad_right) * k, S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle([k, k, S - k, S - k], radius=3 * k, fill=fill, outline=border, width=k + 2)
+        if tick:
+            d.line([(S * 0.26, S * 0.52), (S * 0.43, S * 0.69), (S * 0.75, S * 0.32)],
+                   fill=tick, width=int(2.4 * k), joint="curve")
+        return ImageTk.PhotoImage(im.resize((size + pad_right, size), Image.Resampling.LANCZOS))
+
+    return {
+        "off": box("white", "#8A93A6"),
+        "off_hover": box("#FFF4EA", ORANGE),
+        "off_dis": box("#EEF0F4", "#C9CDD6"),
+        "on": box(ORANGE, ORANGE, "white"),
+        "on_hover": box("#E07B16", "#E07B16", "white"),
+        "on_dis": box("#E9C9A8", "#E9C9A8", "white"),
+    }
+
+
 # --------------------------------------------------------------------------
 # Preview renderer (runs off the UI thread)
 # --------------------------------------------------------------------------
@@ -85,7 +115,18 @@ def open_folder(path):
 class PreviewRenderer:
     def __init__(self):
         self._thumbs = {}            # tile path -> RGB thumbnail (~493 px)
+        self._geoms = {}             # (shp path, mtime) -> (kind, parts)
         self._lock = threading.Lock()
+
+    def geometry(self, path):
+        key = (path, os.path.getmtime(path))
+        with self._lock:
+            if key in self._geoms:
+                return self._geoms[key]
+        g = core.read_shp_geometry(path)
+        with self._lock:
+            self._geoms[key] = g
+        return g
 
     def thumb(self, path):
         with self._lock:
@@ -99,7 +140,7 @@ class PreviewRenderer:
             self._thumbs[path] = th
         return th
 
-    def render(self, box, archive, mode, size=PREVIEW_PX):
+    def render(self, box, archive, mode, size=PREVIEW_PX, shapes=()):
         """Returns (PIL image, info dict)."""
         export_tiles = [archive.resolve(t) for t in core.tiles_for_box(box)]
         tx0 = min(t.x0 for t in export_tiles)
@@ -175,6 +216,20 @@ class PreviewRenderer:
                            fill=(31, 42, 68, 210 if sel else 120))
             draw.text((lx, ly), label, fill="white", font=font)
 
+        # input shapefiles
+        for sh in shapes:
+            kind, parts = self.geometry(sh.bng_path)
+            for part in parts:
+                pts = [to_px(x, y) for x, y in part]
+                if kind == "point" or len(pts) == 1:
+                    for px, py in pts:
+                        draw.ellipse([px - 3, py - 3, px + 3, py + 3], fill=(200, 30, 90, 255))
+                elif kind == "poly":
+                    draw.polygon(pts, fill=(200, 30, 90, 40))
+                    draw.line(pts + [pts[0]], fill=(200, 30, 90, 255), width=2)
+                else:
+                    draw.line(pts, fill=(200, 30, 90, 255), width=2)
+
         # site box
         sx0, sy0 = to_px(box.minx, box.maxy)
         sx1, sy1 = to_px(box.maxx, box.miny)
@@ -206,7 +261,7 @@ class App(tk.Tk):
         self.settings = load_settings()
         self.title(f"{APP_NAME}  v{APP_VERSION}")
         self.configure(bg=PALE)
-        self.minsize(1040, 700)
+        self.minsize(1040, 760)
         self._set_icon()
         self._style()
 
@@ -216,6 +271,7 @@ class App(tk.Tk):
         self._running = False
         self._last_out = None
         self._name_auto = True
+        self.shapes = []             # core.ShapeInput, in list order
 
         self._build()
         self._load_fields()
@@ -251,6 +307,16 @@ class App(tk.Tk):
         st.configure("Head.TLabel", background="white", foreground=NAVY, font=("Segoe UI Semibold", 11))
         st.configure("Hint.TLabel", background="white", foreground="#6B7488", font=("Segoe UI", 9))
         st.configure("Info.TLabel", background=PALE, foreground=NAVY, font=("Segoe UI", 9))
+        self._ticks = make_tick_images()
+        t = self._ticks
+        st.element_create("Tick.indicator", "image", t["off"],
+                          ("disabled", "selected", t["on_dis"]), ("disabled", t["off_dis"]),
+                          ("active", "selected", t["on_hover"]), ("selected", t["on"]),
+                          ("active", t["off_hover"]), border=0, sticky="w")
+        st.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+            ("Tick.indicator", {"side": "left", "sticky": ""}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                ("Checkbutton.label", {"sticky": "nswe"})]})]})])
         st.configure("TRadiobutton", background="white")
         st.configure("TCheckbutton", background="white")
         st.configure("Run.TButton", font=("Segoe UI Semibold", 11), foreground="white",
@@ -304,10 +370,11 @@ class App(tk.Tk):
         # --- site -----------------------------------------------------
         c = self._card(left, "1  Site location")
         self.loc_mode = tk.StringVar(value="centre")
-        ttk.Radiobutton(c, text="Centre grid reference", value="centre", variable=self.loc_mode,
-                        command=self._mode_changed).grid(row=1, column=0, columnspan=2, sticky="w")
-        ttk.Radiobutton(c, text="South-west corner", value="sw", variable=self.loc_mode,
-                        command=self._mode_changed).grid(row=1, column=2, columnspan=2, sticky="w", padx=(14, 0))
+        radios = ttk.Frame(c, style="Card.TFrame")
+        radios.grid(row=1, column=0, columnspan=4, sticky="w")
+        for txt, val in (("Centre grid ref", "centre"), ("South-west corner", "sw"), ("Shapefile(s)", "shp")):
+            ttk.Radiobutton(radios, text=txt, value=val, variable=self.loc_mode,
+                            command=self._mode_changed).pack(side="left", padx=(0, 16))
 
         self.gr_frame = ttk.Frame(c, style="Card.TFrame")
         self.gr_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
@@ -324,7 +391,28 @@ class App(tk.Tk):
         self.sw_n = tk.StringVar()
         ttk.Entry(self.sw_frame, textvariable=self.sw_n, width=10).pack(side="left", padx=(6, 0))
 
+        self.shp_frame = ttk.Frame(c, style="Card.TFrame")
+        lf = ttk.Frame(self.shp_frame, style="Card.TFrame")
+        lf.pack(fill="x")
+        self.shp_list = tk.Listbox(lf, height=3, width=44, relief="solid", bd=1, highlightthickness=0,
+                                   font=("Segoe UI", 9), selectbackground=ORANGE, activestyle="none")
+        self.shp_list.pack(side="left", fill="x", expand=True)
+        bf = ttk.Frame(lf, style="Card.TFrame")
+        bf.pack(side="left", padx=(6, 0), anchor="n")
+        ttk.Button(bf, text="Add…", command=self._add_shp, width=8).pack(pady=(0, 3))
+        ttk.Button(bf, text="Remove", command=self._remove_shp, width=8).pack()
+        brow = ttk.Frame(self.shp_frame, style="Card.TFrame")
+        brow.pack(fill="x", pady=(6, 0))
+        ttk.Label(brow, text="Buffer (m)", style="Card.TLabel", width=10).pack(side="left")
+        self.shp_buffer = tk.StringVar()
+        ttk.Entry(brow, textvariable=self.shp_buffer, width=8).pack(side="left")
+        ttk.Label(brow, text="  added round the most N / S / E / W points", style="Hint.TLabel").pack(side="left")
+        self.shp_convert = tk.BooleanVar()
+        ttk.Checkbutton(self.shp_frame, text="Convert the shapefile(s) to MapInfo TAB in the output",
+                        variable=self.shp_convert).pack(anchor="w", pady=(6, 0))
+
         sz = ttk.Frame(c, style="Card.TFrame")
+        self.size_frame = sz
         sz.grid(row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(sz, text="Width (m)", style="Card.TLabel", width=10).pack(side="left")
         self.width = tk.StringVar()
@@ -352,11 +440,17 @@ class App(tk.Tk):
         e.bind("<Key>", lambda _e: setattr(self, "_name_auto", False))
         ttk.Label(c, text="Folder", style="Card.TLabel").grid(row=2, column=0, sticky="w")
         self.out_dir = tk.StringVar()
-        ttk.Entry(c, textvariable=self.out_dir, width=34).grid(row=2, column=1, sticky="w", pady=2)
-        ttk.Button(c, text="Browse…", command=self._browse_out).grid(row=2, column=2, padx=(6, 0))
+        self.out_entry = ttk.Entry(c, textvariable=self.out_dir, width=34)
+        self.out_entry.grid(row=2, column=1, sticky="w", pady=2)
+        self.out_browse = ttk.Button(c, text="Browse…", command=self._browse_out)
+        self.out_browse.grid(row=2, column=2, padx=(6, 0))
+        self.shp_same_folder = tk.BooleanVar()
+        self.same_cb = ttk.Checkbutton(c, text="Save in the same folder as the shapefile",
+                                       variable=self.shp_same_folder, command=self._same_folder_changed)
+        self.same_cb.grid(row=3, column=1, columnspan=2, sticky="w", pady=(4, 0))
         self.subfolder = tk.BooleanVar(value=False)
         ttk.Checkbutton(c, text="Create a subfolder named after the site", variable=self.subfolder)\
-            .grid(row=3, column=1, columnspan=2, sticky="w", pady=(4, 0))
+            .grid(row=4, column=1, columnspan=2, sticky="w", pady=(2, 0))
 
         # --- run ---------------------------------------------------------
         runrow = ttk.Frame(left)
@@ -368,7 +462,7 @@ class App(tk.Tk):
         self.progress = ttk.Progressbar(left, mode="determinate", maximum=1.0)
         self.progress.pack(fill="x", pady=(10, 4))
 
-        self.log = tk.Text(left, height=9, width=56, bg="white", fg="#26304A", relief="flat",
+        self.log = tk.Text(left, height=6, width=56, bg="white", fg="#26304A", relief="flat",
                            font=("Consolas", 9), wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True)
 
@@ -382,7 +476,7 @@ class App(tk.Tk):
         self.preview_info = ttk.Label(pv, text="", style="Hint.TLabel", justify="left")
         self.preview_info.pack(anchor="w")
 
-        for v in (self.gr, self.sw_e, self.sw_n, self.width, self.height):
+        for v in (self.gr, self.sw_e, self.sw_n, self.width, self.height, self.shp_buffer):
             v.trace_add("write", lambda *_: self.schedule_preview())
 
     def _build_settings(self):
@@ -405,16 +499,19 @@ class App(tk.Tk):
                         variable=self.write_wor).grid(row=4, column=1, sticky="w")
         ttk.Checkbutton(c, text="Write the site boundary (TAB if GDAL is installed, otherwise MIF/MID)",
                         variable=self.write_boundary).grid(row=5, column=1, sticky="w")
+        self.delete_mif = tk.BooleanVar()
+        ttk.Checkbutton(c, text="Delete the boundary MIF/MID once the TAB has been made",
+                        variable=self.delete_mif).grid(row=6, column=1, sticky="w")
         ttk.Checkbutton(c, text="Open the output folder when finished",
-                        variable=self.open_when_done).grid(row=6, column=1, sticky="w")
+                        variable=self.open_when_done).grid(row=7, column=1, sticky="w")
 
         gdal = core.find_ogr2ogr()
         ttk.Label(c, text=f"GDAL: {'found - ' + gdal if gdal else 'not found (boundary will be MIF/MID)'}",
-                  style="Hint.TLabel").grid(row=7, column=1, sticky="w", pady=(10, 0))
+                  style="Hint.TLabel").grid(row=8, column=1, sticky="w", pady=(10, 0))
         ttk.Label(c, text=f"Settings file: {SETTINGS_FILE}", style="Hint.TLabel")\
-            .grid(row=8, column=1, sticky="w")
+            .grid(row=9, column=1, sticky="w")
         ttk.Label(c, text=f"{APP_NAME} v{APP_VERSION}  ·  OS data © Crown copyright and database right",
-                  style="Hint.TLabel").grid(row=9, column=1, sticky="w", pady=(10, 0))
+                  style="Hint.TLabel").grid(row=10, column=1, sticky="w", pady=(10, 0))
 
     # ---- field helpers --------------------------------------------------
     def _load_fields(self):
@@ -424,6 +521,17 @@ class App(tk.Tk):
         self.write_wor.set(s["write_wor"])
         self.write_boundary.set(s["write_boundary"])
         self.open_when_done.set(s["open_when_done"])
+        self.delete_mif.set(s.get("delete_boundary_mif", True))
+        self.shp_buffer.set(s.get("shp_buffer", "300"))
+        self.shp_same_folder.set(s.get("shp_same_folder", False))
+        self.shp_convert.set(s.get("shp_convert", True))
+        for p in s.get("last_shapes", []):          # reload last session's shapefiles
+            try:
+                sh = core.load_shapefile(p)
+                self.shapes.append(sh)
+                self.shp_list.insert("end", os.path.basename(p) + (f"   ({sh.note})" if sh.note else ""))
+            except Exception:
+                pass
         self.loc_mode.set(s.get("last_mode", "centre"))
         self.gr.set(s.get("last_gr", ""))
         self.width.set(s.get("last_width", "1000"))
@@ -433,7 +541,7 @@ class App(tk.Tk):
     def _collect_settings(self):
         self.settings.update({
             "data_root": self.data_root.get().strip(),
-            "out_dir": self.out_dir.get().strip(),
+            "out_dir": self.settings.get("out_dir", "") if self._out_is_auto() else self.out_dir.get().strip(),
             "write_wor": self.write_wor.get(),
             "write_boundary": self.write_boundary.get(),
             "open_when_done": self.open_when_done.get(),
@@ -441,33 +549,97 @@ class App(tk.Tk):
             "last_gr": self.gr.get(),
             "last_width": self.width.get(),
             "last_height": self.height.get(),
+            "delete_boundary_mif": self.delete_mif.get(),
+            "shp_buffer": self.shp_buffer.get(),
+            "shp_same_folder": self.shp_same_folder.get(),
+            "shp_convert": self.shp_convert.get(),
+            "last_shp_dir": self.settings.get("last_shp_dir", ""),
+            "last_shapes": [sh.path for sh in self.shapes],
         })
         save_settings(self.settings)
 
     def _mode_changed(self):
-        # carry the current site across when switching input mode
+        # carry the current site across when switching between centre and SW corner
         prev = getattr(self, "_prev_mode", None)
+        mode = self.loc_mode.get()
         box = None
-        if prev and prev != self.loc_mode.get():
+        if prev and prev != mode:
             try:
                 box = self.get_box(prev)
             except Exception:
                 box = None
-        self._prev_mode = self.loc_mode.get()
-        if self.loc_mode.get() == "centre":
-            self.sw_frame.grid_remove()
-            self.gr_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
-            if box:
-                self.gr.set(core.format_grid_ref(*box.centre))
-            self.sw_hint.config(text="Box is centred on the grid reference.")
+        self._prev_mode = mode
+        for fr in (self.gr_frame, self.sw_frame, self.shp_frame):
+            fr.grid_remove()
+        if mode == "shp":
+            self.shp_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
+            self.size_frame.grid_remove()
+            self.sw_hint.config(text="Site = extent of all shapefiles plus the buffer.")
+            self.same_cb.grid()
         else:
-            self.gr_frame.grid_remove()
-            self.sw_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
-            if box:
-                self.sw_e.set(f"{box.minx:.0f}")
-                self.sw_n.set(f"{box.miny:.0f}")
-            self.sw_hint.config(text="Box extends north and east from the corner.")
+            self.size_frame.grid()
+            self.same_cb.grid_remove()
+            if mode == "centre":
+                self.gr_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
+                if box:
+                    self.gr.set(core.format_grid_ref(*box.centre))
+                    self.width.set(f"{box.width:.0f}"); self.height.set(f"{box.height:.0f}")
+                self.sw_hint.config(text="Box is centred on the grid reference.")
+            else:
+                self.sw_frame.grid(row=2, column=0, columnspan=4, sticky="we", pady=(8, 0))
+                if box:
+                    self.sw_e.set(f"{box.minx:.0f}"); self.sw_n.set(f"{box.miny:.0f}")
+                    self.width.set(f"{box.width:.0f}"); self.height.set(f"{box.height:.0f}")
+                self.sw_hint.config(text="Box extends north and east from the corner.")
+        self._name_auto = True
+        self._same_folder_changed()
         self.schedule_preview()
+
+    # ---- shapefiles ----------------------------------------------------
+    def _add_shp(self):
+        paths = filedialog.askopenfilenames(
+            title="Add shapefile(s)", filetypes=[("Shapefiles", "*.shp"), ("All files", "*.*")],
+            initialdir=self.settings.get("last_shp_dir") or None)
+        added = False
+        for p in paths:
+            p = os.path.normpath(p)
+            if any(os.path.normcase(sh.path) == os.path.normcase(p) for sh in self.shapes):
+                continue
+            try:
+                sh = core.load_shapefile(p)
+            except Exception as exc:
+                messagebox.showerror(APP_NAME, str(exc))
+                continue
+            self.shapes.append(sh)
+            self.shp_list.insert("end", os.path.basename(p) + (f"   ({sh.note})" if sh.note else ""))
+            self.settings["last_shp_dir"] = os.path.dirname(p)
+            added = True
+        if added:
+            self._name_auto = True
+            self._same_folder_changed()
+            self.schedule_preview()
+
+    def _remove_shp(self):
+        for i in reversed(self.shp_list.curselection()):
+            self.shp_list.delete(i)
+            del self.shapes[i]
+        self._same_folder_changed()
+        self.schedule_preview()
+
+    def _out_is_auto(self):
+        return self.loc_mode.get() == "shp" and self.shp_same_folder.get()
+
+    def _same_folder_changed(self):
+        if self._out_is_auto():
+            if not getattr(self, "_saved_out", None):
+                self._saved_out = self.out_dir.get()
+            self.out_dir.set(os.path.dirname(self.shapes[0].path) if self.shapes else "")
+            self.out_entry.state(["disabled"]); self.out_browse.state(["disabled"])
+        else:
+            if getattr(self, "_saved_out", None) is not None:
+                self.out_dir.set(self._saved_out)
+                self._saved_out = None
+            self.out_entry.state(["!disabled"]); self.out_browse.state(["!disabled"])
 
     def _num(self, var, label):
         try:
@@ -476,8 +648,13 @@ class App(tk.Tk):
             raise ValueError(f"{label} must be a number")
 
     def get_box(self, mode=None):
+        mode = mode or self.loc_mode.get()
+        if mode == "shp":
+            box = core.box_from_shapefiles(self.shapes, self._num(self.shp_buffer, "Buffer"))
+            box.validate()
+            return box
         w, h = self._num(self.width, "Width"), self._num(self.height, "Height")
-        if (mode or self.loc_mode.get()) == "centre":
+        if mode == "centre":
             e, n = core.parse_grid_ref(self.gr.get())
             box = core.SiteBox.from_centre(e, n, w, h)
         else:
@@ -520,9 +697,14 @@ class App(tk.Tk):
             self.preview_info.config(text=f"⚠ {exc}")
             return
         cx, cy = box.centre
+        shp_mode = self.loc_mode.get() == "shp"
+        shapes = list(self.shapes) if shp_mode else []
         if self._name_auto:
-            self.site_name.set(f"{core.format_grid_ref(cx, cy).replace(' ', '')}_"
-                               f"{box.width:.0f}x{box.height:.0f}")
+            if shp_mode:
+                self.site_name.set(shapes[0].name if shapes else "Site")
+            else:
+                self.site_name.set(f"{core.format_grid_ref(cx, cy).replace(' ', '')}_"
+                                   f"{box.width:.0f}x{box.height:.0f}")
         n_tiles = len(core.tiles_for_box(box))
         if n_tiles > 400:
             self.canvas.delete("all")
@@ -538,7 +720,7 @@ class App(tk.Tk):
             try:
                 archive = core.TileArchive(root)
                 archive.check_root()
-                img, info = self.renderer.render(box, archive, mode)
+                img, info = self.renderer.render(box, archive, mode, shapes=shapes)
                 self.after(0, lambda: self._show_preview(gen, box, img, info, mode))
             except Exception as exc:
                 self.after(0, lambda: gen == self._preview_gen and
@@ -592,6 +774,9 @@ class App(tk.Tk):
             make_subfolder=self.subfolder.get(),
             write_wor=self.write_wor.get(),
             write_boundary=self.write_boundary.get(),
+            delete_boundary_mif=self.delete_mif.get(),
+            shapefiles=list(self.shapes) if self.loc_mode.get() == "shp" else [],
+            convert_shapefiles=self.shp_convert.get(),
         )
         self._collect_settings()
         self._running = True
