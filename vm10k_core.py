@@ -38,7 +38,7 @@ from PIL import Image, TiffImagePlugin
 
 Image.MAX_IMAGE_PIXELS = None
 
-__version__ = "1.1.3"
+__version__ = "1.1.4"
 
 DEFAULT_DATA_ROOT = r"E:\DATA\AVectormap"
 TILE_SIZE_M = 5000

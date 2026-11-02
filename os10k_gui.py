@@ -109,6 +109,27 @@ def make_tick_images(size=16, pad_right=6):
     }
 
 
+def make_tab_images(r=7, k=4):
+    """Rounded-top tab backgrounds (9-slice): normal, hover, selected."""
+    W, H = 32, 28
+    border = (205, 211, 221, 255)
+
+    def tab(fill, bottom_line):
+        im = Image.new("RGBA", (W * k, H * k), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle([0, 0, W * k - 1, (H + r) * k], radius=r * k, fill=border)
+        d.rounded_rectangle([k, k, W * k - 1 - k, (H + r) * k], radius=(r - 1) * k, fill=fill)
+        if bottom_line:
+            d.rectangle([0, (H - 1) * k, W * k, H * k], fill=border)
+        return ImageTk.PhotoImage(im.resize((W, H), Image.Resampling.LANCZOS))
+
+    return {
+        "normal": tab((226, 230, 237, 255), True),
+        "hover": tab((236, 239, 244, 255), True),
+        "selected": tab((255, 255, 255, 255), False),
+    }
+
+
 def make_cog_image(size=20, k=8, colour=(74, 84, 104, 255)):
     """Outline-only settings cog: gear edge plus centre ring, no fill."""
     S = size * k
@@ -345,16 +366,20 @@ class App(tk.Tk):
         st.map("Run.TButton", background=[("disabled", "#C9CDD6"), ("active", "#E07B16")])
         st.configure("TButton", padding=(10, 5))
         st.configure("TNotebook", background=PALE, borderwidth=0)
-        st.configure("TNotebook", tabmargins=(2, 6, 2, 0))
+        self._tabimgs = ti = make_tab_images()
+        st.element_create("Rounded.tab", "image", ti["normal"],
+                          ("selected", ti["selected"]), ("active", ti["hover"]),
+                          border=(8, 8, 8, 2), sticky="nsew")
+        st.layout("TNotebook.Tab", [("Rounded.tab", {"sticky": "nswe", "children": [
+            ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.label", {"side": "top", "sticky": ""})]})]})])
+        st.configure("TNotebook", tabmargins=(2, 6, 2, 0), bordercolor="#CDD3DD",
+                     lightcolor="white", darkcolor="#CDD3DD", background=PALE)
         st.configure("TNotebook.Tab", padding=(18, 7), font=("Segoe UI Semibold", 10),
-                     foreground="#7A8296", background="#DDE2EA", bordercolor="#C9CED8",
-                     lightcolor="#DDE2EA")
+                     foreground="#7A8296", background=PALE)
         st.map("TNotebook.Tab",
-               background=[("selected", "white"), ("active", "#EAEEF4")],
                foreground=[("selected", NAVY), ("active", "#4A5368")],
-               lightcolor=[("selected", ORANGE)],
-               bordercolor=[("selected", ORANGE)],
-               padding=[("selected", (18, 9, 18, 7))],
+               padding=[("selected", (18, 7))],
                expand=[("selected", (0, 0, 0, 0))])
         st.configure("Horizontal.TProgressbar", background=ORANGE, troughcolor="#E1E5EC")
 
@@ -381,7 +406,8 @@ class App(tk.Tk):
         self.main = ttk.Frame(self.nb)
         self.settings_tab = ttk.Frame(self.nb)
         self._cog_img = ImageTk.PhotoImage(make_cog_image(20))
-        self.nb.add(self.main, text="Extract")
+        self._tab_spacer = ImageTk.PhotoImage(Image.new("RGBA", (1, 20), (0, 0, 0, 0)))  # match cog height
+        self.nb.add(self.main, text="Extract", image=self._tab_spacer, compound="left")
         self.nb.add(self.settings_tab, text=" Settings", image=self._cog_img, compound="left")
         self._build_main()
         self._build_settings()

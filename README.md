@@ -1,4 +1,4 @@
-# OS 10k Tool  (v1.1.3)
+# OS 10k Tool  (v1.1.4)
 
 Desktop tool that pulls **OS VectorMap Local raster (1:10,000)** tiles for a site and
 writes them out ready to open in **MapInfo Professional 8.5**.
@@ -77,6 +77,7 @@ Optional single .exe: `pyinstaller --onefile --windowed --icon os10k_icon.ico --
 
 ## Version history
 
+- **1.1.4** (2026-11-02): Rounded tabs with a soft grey border. Orange highlight removed.
 - **1.1.3** (2026-11-02): Tabs back to equal size. The open tab is shown by its white background, navy text and orange edge.
 - **1.1.2** (2026-11-02): Settings cog is drawn as an outline only.
 - **1.1.1** (2026-11-02): Proper cog icon on the Settings tab. The selected tab is drawn larger.
