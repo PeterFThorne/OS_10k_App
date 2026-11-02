@@ -11,6 +11,7 @@ Run:  pythonw os10k_gui.py      (or double-click Run_OS_10k_Tool.bat)
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -106,6 +107,34 @@ def make_tick_images(size=16, pad_right=6):
         "on_hover": box("#E07B16", "#E07B16", "white"),
         "on_dis": box("#E9C9A8", "#E9C9A8", "white"),
     }
+
+
+def make_cog_image(size=20, k=8):
+    """Windows-style settings cog: grey gear, light ring, blue centre."""
+    S = size * k
+    c = S / 2
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    R, r, n = S * 0.48, S * 0.36, 8
+    pts = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        for da, rad in ((-0.30, r), (-0.20, R), (0.20, R), (0.30, r)):
+            t = a + da * (2 * math.pi / n)
+            pts.append((c + rad * math.cos(t), c + rad * math.sin(t)))
+    grey = (104, 112, 124, 255)
+    d.polygon(pts, fill=grey)
+    d.ellipse([c - r, c - r, c + r, c + r], fill=grey)
+    d.ellipse([c - S * 0.25, c - S * 0.25, c + S * 0.25, c + S * 0.25], fill=(236, 238, 242, 255))
+    rb = S * 0.19                                      # blue centre, light top-left to dark
+    steps = 40
+    for j in range(steps):
+        f = j / (steps - 1)
+        rr = rb * (1 - f * 0.92)
+        ox, oy = -rb * 0.28 * f, -rb * 0.28 * f
+        col = (int(14 + 50 * f), int(72 + 74 * f), int(160 + 70 * f), 255)
+        d.ellipse([c + ox - rr, c + oy - rr, c + ox + rr, c + oy + rr], fill=col)
+    return im.resize((size, size), Image.Resampling.LANCZOS)
 
 
 # --------------------------------------------------------------------------
@@ -324,8 +353,15 @@ class App(tk.Tk):
         st.map("Run.TButton", background=[("disabled", "#C9CDD6"), ("active", "#E07B16")])
         st.configure("TButton", padding=(10, 5))
         st.configure("TNotebook", background=PALE, borderwidth=0)
-        st.configure("TNotebook.Tab", padding=(16, 6), font=("Segoe UI Semibold", 10))
-        st.map("TNotebook.Tab", background=[("selected", "white")], foreground=[("selected", NAVY)])
+        st.configure("TNotebook", tabmargins=(2, 6, 2, 0))
+        st.configure("TNotebook.Tab", padding=(14, 5), font=("Segoe UI Semibold", 10),
+                     foreground="#5A6378", background="#E1E5EC")
+        st.map("TNotebook.Tab",
+               background=[("selected", "white"), ("active", "#EEF1F6")],
+               foreground=[("selected", NAVY)],
+               font=[("selected", ("Segoe UI Semibold", 12))],
+               padding=[("selected", (22, 9))],
+               expand=[("selected", (2, 6, 2, 0))])
         st.configure("Horizontal.TProgressbar", background=ORANGE, troughcolor="#E1E5EC")
 
     # ---- layout ---------------------------------------------------------
@@ -350,8 +386,9 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True, padx=12, pady=(10, 12))
         self.main = ttk.Frame(self.nb)
         self.settings_tab = ttk.Frame(self.nb)
-        self.nb.add(self.main, text="  Extract  ")
-        self.nb.add(self.settings_tab, text="  ⚙ Settings  ")
+        self._cog_img = ImageTk.PhotoImage(make_cog_image(20))
+        self.nb.add(self.main, text="Extract")
+        self.nb.add(self.settings_tab, text=" Settings", image=self._cog_img, compound="left")
         self._build_main()
         self._build_settings()
 

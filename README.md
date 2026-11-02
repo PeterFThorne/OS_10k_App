@@ -1,4 +1,4 @@
-# OS 10k Tool  (v1.1.0)
+# OS 10k Tool  (v1.1.1)
 
 Desktop tool that pulls **OS VectorMap Local raster (1:10,000)** tiles for a site and
 writes them out ready to open in **MapInfo Professional 8.5**.
@@ -77,6 +77,7 @@ Optional single .exe: `pyinstaller --onefile --windowed --icon os10k_icon.ico --
 
 ## Version history
 
+- **1.1.1** (2026-11-02): Proper cog icon on the Settings tab. The selected tab is drawn larger.
 - **1.1.0** (2026-11-02): Tick-style checkboxes. Option to delete the boundary MIF/MID once its TAB is made
   (on by default). New shapefile site mode: extent + buffer, BNG check and reprojection, shapefiles drawn
   on the preview, convert-to-TAB option, save-in-shapefile-folder option.
